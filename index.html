@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spine Savior — 3D Spinal Visualization</title>
+  <meta name="description" content="Real-time physiologically accurate 3D spinal visualization driven by BNO055 IMU sensors">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- Three.js Canvas Container -->
+  <div id="canvas-container"></div>
+
+  <!-- Top Header Bar -->
+  <header id="header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">🦴</span>
+        <h1>SPINE SAVIOR</h1>
+      </div>
+      <div class="connection-status" id="connectionStatus">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Disconnected</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <label class="sim-toggle">
+        <input type="checkbox" id="simToggle">
+        <span class="toggle-slider"></span>
+        <span class="toggle-label">Simulation</span>
+      </label>
+      <button id="connectBtn" class="btn-primary">Connect</button>
+      <button id="calibrateBtn" class="btn-secondary">Calibrate</button>
+    </div>
+  </header>
+
+  <!-- Left Panel: Sensor Readings -->
+  <aside id="readingsPanel" class="glass-panel">
+    <h3>SENSOR READINGS</h3>
+    <div class="region-block">
+      <div class="region-header">
+        <span class="region-dot" style="background: #64FFDA"></span>
+        <span>CERVICAL</span>
+      </div>
+      <div class="readings-grid">
+        <div class="reading"><label>H</label><span id="cH">0.0</span><small>°</small></div>
+        <div class="reading"><label>P</label><span id="cP">0.0</span><small>°</small></div>
+        <div class="reading"><label>R</label><span id="cR">0.0</span><small>°</small></div>
+      </div>
+    </div>
+    <div class="region-block">
+      <div class="region-header">
+        <span class="region-dot" style="background: #32D2FF"></span>
+        <span>THORACIC</span>
+      </div>
+      <div class="readings-grid">
+        <div class="reading"><label>H</label><span id="tH">0.0</span><small>°</small></div>
+        <div class="reading"><label>P</label><span id="tP">0.0</span><small>°</small></div>
+        <div class="reading"><label>R</label><span id="tR">0.0</span><small>°</small></div>
+      </div>
+    </div>
+    <div class="region-block">
+      <div class="region-header">
+        <span class="region-dot" style="background: #536DFE"></span>
+        <span>LUMBAR</span>
+      </div>
+      <div class="readings-grid">
+        <div class="reading"><label>H</label><span id="lH">0.0</span><small>°</small></div>
+        <div class="reading"><label>P</label><span id="lP">0.0</span><small>°</small></div>
+        <div class="reading"><label>R</label><span id="lR">0.0</span><small>°</small></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Right Panel: Posture Score -->
+  <aside id="scorePanel" class="glass-panel">
+    <h3>POSTURE SCORE</h3>
+    <div class="score-gauge">
+      <svg viewBox="0 0 120 120" id="scoreGauge">
+        <defs>
+          <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#64FFDA"/>
+            <stop offset="100%" style="stop-color:#536DFE"/>
+          </linearGradient>
+        </defs>
+        <circle cx="60" cy="60" r="52" class="gauge-bg"/>
+        <circle cx="60" cy="60" r="52" class="gauge-fill" id="gaugeFill"/>
+        <text x="60" y="55" class="gauge-value" id="scoreValue">--</text>
+        <text x="60" y="72" class="gauge-label">/ 100</text>
+      </svg>
+    </div>
+    <div class="posture-status" id="postureStatus">Waiting for data…</div>
+
+    <h3 class="section-title">ALERTS</h3>
+    <div id="alertsList" class="alerts-list">
+      <div class="alert-item info">No active alerts</div>
+    </div>
+
+    <h3 class="section-title">CONTROLS</h3>
+    <div class="controls-legend">
+      <div class="control-item"><kbd>C</kbd> Calibrate</div>
+      <div class="control-item"><kbd>S</kbd> Simulation</div>
+      <div class="control-item"><kbd>R</kbd> Reset View</div>
+      <div class="control-item"><kbd>Scroll</kbd> Zoom</div>
+      <div class="control-item"><kbd>Drag</kbd> Orbit</div>
+    </div>
+  </aside>
+
+  <!-- Bottom Status Bar -->
+  <footer id="statusBar">
+    <span id="fpsCounter">-- FPS</span>
+    <span class="sep">|</span>
+    <span id="dataRate">-- Hz</span>
+    <span class="sep">|</span>
+    <span id="calibStatus">Calibration: pending</span>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
