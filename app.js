@@ -7,12 +7,64 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 // ============================================================
-//  CONFIGURATION
+//  CONFIGURATION — Biomechanical Data Tables
+//  Sources: PubMed ROM studies, Disney Research dynamics,
+//  BNO055 datasheets, motion capture literature (52 sources)
 // ============================================================
 const CONFIG = {
-    smoothing: 0.3,
-    // Model file
     modelPath: 'spine.glb',
+
+    // Spring-damper smoothing (critically damped second-order system)
+    spring: {
+        stiffness: 150.0,
+        get damping() { return 2.0 * Math.sqrt(this.stiffness); },
+    },
+
+    // Where each sensor sits along the vertebral chain (global index, 0=L1 bottom)
+    sensorPositions: { lumbar: 2, thoracic: 12, cervical: 20 },
+    blendSigma: 4.0, // Gaussian falloff width for inter-region blending
+
+    // Per-vertebra flexibility weights (bottom→top, sums to 1.0 within each region)
+    // Source: PubMed in-vivo segmental ROM data
+    flexWeights: {
+        lumbar: [0.16, 0.17, 0.19, 0.24, 0.24],
+        thoracic: [0.10, 0.10, 0.09, 0.08, 0.07, 0.06,
+            0.06, 0.07, 0.08, 0.09, 0.10, 0.10],
+        cervical: [0.25, 0.25, 0.10, 0.10, 0.10, 0.10, 0.10],
+    },
+
+    // ROM constraints in degrees per spinal level [flexExt, latBend, axialRot]
+    // Source: PubMed segmental ROM and neutral zone studies
+    romLimits: {
+        lumbar: [
+            [9.5, 8.4, 1.6],   // L1-L2
+            [10.1, 9.8, 2.4],   // L2-L3
+            [11.2, 12.0, 1.3],  // L3-L4
+            [14.3, 8.8, 2.1],   // L4-L5
+            [14.3, 7.6, 1.6],   // L5-S1
+        ],
+        thoracic: [
+            [4.0, 6.0, 9.0], [4.0, 6.0, 8.0], [4.0, 5.0, 7.0], [3.5, 5.0, 6.0],
+            [3.0, 4.0, 5.0], [2.5, 3.5, 4.0], [2.5, 3.5, 4.0], [3.0, 4.0, 5.0],
+            [3.5, 5.0, 5.0], [4.0, 5.0, 4.0], [5.0, 5.0, 3.0], [5.0, 5.0, 3.0],
+        ],
+        cervical: [
+            [15.0, 8.0, 40.0],  // C1-C2 (atlas-axis: massive axial rotation)
+            [15.0, 8.0, 40.0],  // C2-C3
+            [10.0, 10.0, 7.0],  // C3-C4
+            [10.0, 10.0, 7.0],  // C4-C5
+            [10.0, 10.0, 7.0],  // C5-C6
+            [8.0, 7.0, 5.0],   // C6-C7
+            [5.0, 4.0, 3.0],   // C7-T1
+        ],
+    },
+
+    // Global regional ROM totals (for posture scoring normalization)
+    regionalROM: {
+        cervical: { flexExt: 64, latBend: 49, axialRot: 85 },
+        thoracic: { flexExt: 26, latBend: 30, axialRot: 47 },
+        lumbar: { flexExt: 65, latBend: 30, axialRot: 15.3 },
+    },
 };
 
 // ============================================================
@@ -27,8 +79,7 @@ class SpineSavior {
         };
         this.baseline = null;
         this.dataReady = false;
-        this.joints = [];            // { group, region, restPitch }
-        this.regionCounts = { lumbar: 5, thoracic: 12, cervical: 7 };
+        this.joints = [];  // { group, region, regionIndex, globalIndex, flexWeight, romLimit, velocity, currentRot }
         this.port = null;
         this.reader = null;
         this.keepReading = false;
@@ -241,11 +292,23 @@ class SpineSavior {
             info.mesh.matrix.copy(newLocalMatrix);
             info.mesh.matrix.decompose(info.mesh.position, info.mesh.quaternion, info.mesh.scale);
 
-            // Store joint for animation
+            // Determine the local index within this region
+            const regionIndex = (region === 'lumbar') ? i
+                : (region === 'thoracic') ? i - lumbarCount
+                    : i - lumbarCount - thoracicCount;
+
+            // Store joint with full biomechanical metadata + spring-damper state
             this.joints.push({
                 group: wrapper,
                 region: region,
+                regionIndex: regionIndex,
+                globalIndex: i,
                 restPitch: 0,
+                flexWeight: CONFIG.flexWeights[region][regionIndex] || (1 / CONFIG.flexWeights[region].length),
+                romLimit: CONFIG.romLimits[region][regionIndex] || [10, 10, 10],
+                // Spring-damper per-axis state
+                velocity: { x: 0, y: 0, z: 0 },
+                currentRot: { x: 0, y: 0, z: 0 },
             });
         }
 
@@ -318,17 +381,12 @@ class SpineSavior {
         if (parts.length !== 9) return;
         const v = parts.map(s => parseFloat(s.trim()));
         if (v.some(Number.isNaN)) return;
-        const s = 1 - CONFIG.smoothing;
+
+        // Direct assignment — spring-damper in updateSpine() handles all smoothing
         const d = this.sensorData;
-        d.cervical.h = THREE.MathUtils.lerp(d.cervical.h, v[0], s);
-        d.cervical.p = THREE.MathUtils.lerp(d.cervical.p, v[1], s);
-        d.cervical.r = THREE.MathUtils.lerp(d.cervical.r, v[2], s);
-        d.thoracic.h = THREE.MathUtils.lerp(d.thoracic.h, v[3], s);
-        d.thoracic.p = THREE.MathUtils.lerp(d.thoracic.p, v[4], s);
-        d.thoracic.r = THREE.MathUtils.lerp(d.thoracic.r, v[5], s);
-        d.lumbar.h = THREE.MathUtils.lerp(d.lumbar.h, v[6], s);
-        d.lumbar.p = THREE.MathUtils.lerp(d.lumbar.p, v[7], s);
-        d.lumbar.r = THREE.MathUtils.lerp(d.lumbar.r, v[8], s);
+        d.thoracic.h = v[0]; d.thoracic.p = v[1]; d.thoracic.r = v[2]; // port 0 → thoracic
+        d.lumbar.h = v[3]; d.lumbar.p = v[4]; d.lumbar.r = v[5]; // port 2 → lumbar
+        d.cervical.h = v[6]; d.cervical.p = v[7]; d.cervical.r = v[8]; // port 3 → cervical
         this.dataReady = true;
         this.dataCount++;
     }
@@ -340,15 +398,22 @@ class SpineSavior {
         const t = time * 0.001;
         const breath = Math.sin(t * Math.PI * 2 * 0.15);
         const d = this.sensorData;
-        d.cervical.h = Math.sin(t * 0.3) * 3;
-        d.cervical.p = breath * 2.5 + Math.sin(t * 0.7) * 1.5;
-        d.cervical.r = Math.sin(t * 0.5) * 2;
-        d.thoracic.h = Math.sin(t * 0.25) * 1.5;
-        d.thoracic.p = breath * 3.5 + Math.sin(t * 0.4) * 0.8;
-        d.thoracic.r = Math.sin(t * 0.6) * 1.2;
-        d.lumbar.h = Math.sin(t * 0.2) * 0.8;
-        d.lumbar.p = breath * 2.5 + Math.sin(t * 0.35) * 1;
-        d.lumbar.r = Math.sin(t * 0.45) * 0.7;
+
+        // Cervical: high ROM for axial rotation (C1-C2), moderate flex/ext
+        d.cervical.h = Math.sin(t * 0.3) * 8;
+        d.cervical.p = breath * 4 + Math.sin(t * 0.7) * 3;
+        d.cervical.r = Math.sin(t * 0.5) * 4;
+
+        // Thoracic: low flex/ext (rib cage constraint), moderate axial rotation
+        d.thoracic.h = Math.sin(t * 0.25) * 6;
+        d.thoracic.p = breath * 2 + Math.sin(t * 0.4) * 1.5;
+        d.thoracic.r = Math.sin(t * 0.6) * 4;
+
+        // Lumbar: high flex/ext, almost no axial rotation
+        d.lumbar.h = Math.sin(t * 0.2) * 1.5;
+        d.lumbar.p = breath * 6 + Math.sin(t * 0.35) * 4;
+        d.lumbar.r = Math.sin(t * 0.45) * 3;
+
         this.dataReady = true;
     }
 
@@ -363,15 +428,68 @@ class SpineSavior {
             thoracic: { h: 0, p: 0, r: 0 },
             lumbar: { h: 0, p: 0, r: 0 },
         };
+
+        // 1. Compute per-region deltas (degrees, baseline-subtracted)
+        const regionDeltas = {};
+        for (const region of ['lumbar', 'thoracic', 'cervical']) {
+            regionDeltas[region] = {
+                p: d[region].p - b[region].p,  // pitch → flexion/extension
+                r: d[region].r - b[region].r,  // roll  → lateral bend
+                h: d[region].h - b[region].h,  // heading → axial rotation
+            };
+        }
+
+        const dt = 1.0 / 60.0;
+        const K = CONFIG.spring.stiffness;
+        const D = CONFIG.spring.damping;
+        const sigma = CONFIG.blendSigma;
+        const sensorPos = CONFIG.sensorPositions;
+
         for (const joint of this.joints) {
-            const region = joint.region;
-            const n = this.regionCounts[region];
-            const dh = (d[region].h - b[region].h) / n;
-            const dp = (d[region].p - b[region].p) / n;
-            const dr = (d[region].r - b[region].r) / n;
-            joint.group.rotation.x = joint.restPitch + THREE.MathUtils.degToRad(dp);
-            joint.group.rotation.y = THREE.MathUtils.degToRad(-dh);
-            joint.group.rotation.z = THREE.MathUtils.degToRad(dr);
+            // 2. GAUSSIAN BLENDING — blend all 3 sensor signals with distance falloff
+            let blendedP = 0, blendedR = 0, blendedH = 0, totalWeight = 0;
+            for (const region of ['lumbar', 'thoracic', 'cervical']) {
+                const dist = Math.abs(joint.globalIndex - sensorPos[region]);
+                const w = Math.exp(-(dist * dist) / (2 * sigma * sigma));
+                blendedP += regionDeltas[region].p * w;
+                blendedR += regionDeltas[region].r * w;
+                blendedH += regionDeltas[region].h * w;
+                totalWeight += w;
+            }
+            blendedP /= totalWeight;
+            blendedR /= totalWeight;
+            blendedH /= totalWeight;
+
+            // 3. FLEXIBILITY WEIGHTING — scale by this vertebra's biomechanical share
+            const fw = joint.flexWeight;
+            const regionVertCount = CONFIG.flexWeights[joint.region].length;
+            const scaledP = blendedP * fw * regionVertCount;
+            const scaledR = blendedR * fw * regionVertCount;
+            const scaledH = blendedH * fw * regionVertCount;
+
+            // 4. ROM CLAMPING — enforce anatomical limits per level
+            const [maxFE, maxLB, maxAR] = joint.romLimit;
+            const clampedP = THREE.MathUtils.clamp(scaledP, -maxFE, maxFE);
+            const clampedR = THREE.MathUtils.clamp(scaledR, -maxLB, maxLB);
+            const clampedH = THREE.MathUtils.clamp(scaledH, -maxAR, maxAR);
+
+            // 5. SPRING-DAMPER SMOOTHING — critically damped second-order system
+            const targets = {
+                x: THREE.MathUtils.degToRad(clampedP),
+                y: THREE.MathUtils.degToRad(-clampedH),
+                z: THREE.MathUtils.degToRad(clampedR),
+            };
+            for (const axis of ['x', 'y', 'z']) {
+                const error = targets[axis] - joint.currentRot[axis];
+                const accel = K * error - D * joint.velocity[axis];
+                joint.velocity[axis] += accel * dt;
+                joint.currentRot[axis] += joint.velocity[axis] * dt;
+            }
+
+            // 6. APPLY to the wrapper group
+            joint.group.rotation.x = joint.restPitch + joint.currentRot.x;
+            joint.group.rotation.y = joint.currentRot.y;
+            joint.group.rotation.z = joint.currentRot.z;
         }
     }
 
@@ -385,11 +503,19 @@ class SpineSavior {
             thoracic: { h: 0, p: 0, r: 0 },
             lumbar: { h: 0, p: 0, r: 0 },
         };
-        const dev =
-            Math.abs(d.cervical.p - b.cervical.p) + Math.abs(d.cervical.r - b.cervical.r) +
-            Math.abs(d.thoracic.p - b.thoracic.p) + Math.abs(d.thoracic.r - b.thoracic.r) +
-            Math.abs(d.lumbar.p - b.lumbar.p) + Math.abs(d.lumbar.r - b.lumbar.r);
-        return Math.max(0, Math.round(100 - dev * 0.8));
+        const rom = CONFIG.regionalROM;
+
+        // ROM-normalized deviation: how far off baseline as fraction of max ROM
+        const cervDev = Math.abs(d.cervical.p - b.cervical.p) / rom.cervical.flexExt +
+            Math.abs(d.cervical.r - b.cervical.r) / rom.cervical.latBend;
+        const thorDev = Math.abs(d.thoracic.p - b.thoracic.p) / rom.thoracic.flexExt +
+            Math.abs(d.thoracic.r - b.thoracic.r) / rom.thoracic.latBend;
+        const lumDev = Math.abs(d.lumbar.p - b.lumbar.p) / rom.lumbar.flexExt +
+            Math.abs(d.lumbar.r - b.lumbar.r) / rom.lumbar.latBend;
+
+        // Average normalized deviation (0 = perfect, 1 = at ROM limit)
+        const normalizedDev = (cervDev + thorDev + lumDev) / 6;
+        return Math.max(0, Math.round(100 * (1 - normalizedDev * 2)));
     }
 
     // ==========================================================
@@ -433,12 +559,28 @@ class SpineSavior {
             thoracic: { h: 0, p: 0, r: 0 },
             lumbar: { h: 0, p: 0, r: 0 },
         };
+        const rom = CONFIG.regionalROM;
         const alerts = [];
-        if (Math.abs(d.cervical.p - b.cervical.p) > 20) alerts.push({ cls: 'bad', text: '🚨 Severe forward head tilt' });
-        else if (Math.abs(d.cervical.p - b.cervical.p) > 10) alerts.push({ cls: 'warn', text: '⚠️ Forward head posture' });
-        if (Math.abs(d.cervical.r - b.cervical.r) > 15) alerts.push({ cls: 'warn', text: '⚠️ Head lateral tilt' });
-        if (Math.abs(d.thoracic.p - b.thoracic.p) > 15) alerts.push({ cls: 'warn', text: '⚠️ Thoracic slouching' });
-        if (Math.abs(d.lumbar.p - b.lumbar.p) > 15) alerts.push({ cls: 'warn', text: '⚠️ Lumbar over-flexion' });
+
+        // ROM-relative thresholds: warn at >50% ROM, bad at >75% ROM
+        const cervP = Math.abs(d.cervical.p - b.cervical.p);
+        if (cervP > rom.cervical.flexExt * 0.75)
+            alerts.push({ cls: 'bad', text: '🚨 Severe forward head tilt' });
+        else if (cervP > rom.cervical.flexExt * 0.5)
+            alerts.push({ cls: 'warn', text: '⚠️ Forward head posture' });
+
+        if (Math.abs(d.cervical.r - b.cervical.r) > rom.cervical.latBend * 0.5)
+            alerts.push({ cls: 'warn', text: '⚠️ Head lateral tilt' });
+
+        if (Math.abs(d.thoracic.p - b.thoracic.p) > rom.thoracic.flexExt * 0.5)
+            alerts.push({ cls: 'warn', text: '⚠️ Thoracic slouching' });
+
+        if (Math.abs(d.lumbar.p - b.lumbar.p) > rom.lumbar.flexExt * 0.5)
+            alerts.push({ cls: 'warn', text: '⚠️ Lumbar over-flexion' });
+
+        if (Math.abs(d.lumbar.h - b.lumbar.h) > rom.lumbar.axialRot * 0.5)
+            alerts.push({ cls: 'warn', text: '⚠️ Lumbar over-rotation' });
+
         if (!alerts.length) alerts.push({ cls: 'good', text: '✅ All regions aligned' });
         document.getElementById('alertsList').innerHTML =
             alerts.map(a => `<div class="alert-item ${a.cls}">${a.text}</div>`).join('');
