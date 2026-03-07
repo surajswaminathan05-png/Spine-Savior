@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
   <script type="importmap">
   {
     "imports": {
@@ -42,6 +43,7 @@
       </label>
       <button id="connectBtn" class="btn-primary">Connect</button>
       <button id="calibrateBtn" class="btn-secondary">Calibrate</button>
+      <button id="resetCalibBtn" class="btn-secondary" style="display:none">Reset Cal</button>
     </div>
   </header>
 
@@ -105,6 +107,86 @@
     <h3 class="section-title">ALERTS</h3>
     <div id="alertsList" class="alerts-list">
       <div class="alert-item info">No active alerts</div>
+    </div>
+
+    <h3 class="section-title">ML CLASSIFIER</h3>
+    <div id="mlPanel" class="ml-panel">
+      <div class="ml-status" id="mlStatus">Model: not loaded</div>
+      <div class="ml-prediction" id="mlPrediction">—</div>
+      <div class="ml-confidence" id="mlConfidence"></div>
+    </div>
+
+    <h3 class="section-title">AI COACH</h3>
+    <div id="coachPanel" class="coach-panel">
+      <div class="coach-message" id="coachMessage">Waiting for classification…</div>
+    </div>
+
+    <h3 class="section-title">TRAINING WIZARD</h3>
+    <div id="wizardPanel" class="wizard-panel">
+      <!-- Per-posture progress rows -->
+      <div class="wizard-steps">
+        <div class="wizard-step" data-label="normal" id="step-normal">
+          <span class="step-icon">⬜</span>
+          <span class="step-label">Normal</span>
+          <div class="step-bar"><div class="step-fill" id="fill-normal"></div></div>
+          <span class="step-pct" id="pct-normal">0%</span>
+          <button class="step-reset" data-label="normal" title="Reset this posture">✕</button>
+        </div>
+        <div class="wizard-step" data-label="forward_head" id="step-forward_head">
+          <span class="step-icon">⬜</span>
+          <span class="step-label">Fwd Head</span>
+          <div class="step-bar"><div class="step-fill" id="fill-forward_head"></div></div>
+          <span class="step-pct" id="pct-forward_head">0%</span>
+          <button class="step-reset" data-label="forward_head" title="Reset this posture">✕</button>
+        </div>
+        <div class="wizard-step" data-label="slouching" id="step-slouching">
+          <span class="step-icon">⬜</span>
+          <span class="step-label">Slouch</span>
+          <div class="step-bar"><div class="step-fill" id="fill-slouching"></div></div>
+          <span class="step-pct" id="pct-slouching">0%</span>
+          <button class="step-reset" data-label="slouching" title="Reset this posture">✕</button>
+        </div>
+        <div class="wizard-step" data-label="lordosis" id="step-lordosis">
+          <span class="step-icon">⬜</span>
+          <span class="step-label">Lordosis</span>
+          <div class="step-bar"><div class="step-fill" id="fill-lordosis"></div></div>
+          <span class="step-pct" id="pct-lordosis">0%</span>
+          <button class="step-reset" data-label="lordosis" title="Reset this posture">✕</button>
+        </div>
+        <div class="wizard-step" data-label="lateral_tilt" id="step-lateral_tilt">
+          <span class="step-icon">⬜</span>
+          <span class="step-label">Lat Tilt</span>
+          <div class="step-bar"><div class="step-fill" id="fill-lateral_tilt"></div></div>
+          <span class="step-pct" id="pct-lateral_tilt">0%</span>
+          <button class="step-reset" data-label="lateral_tilt" title="Reset this posture">✕</button>
+        </div>
+      </div>
+
+      <!-- Instruction + timer area -->
+      <div class="wizard-instruction" id="wizardInstruction">
+        Click a posture above or press Start to begin guided training.
+      </div>
+      <div class="wizard-timer" id="wizardTimer"></div>
+
+      <!-- Wizard controls -->
+      <div class="wizard-controls">
+        <button id="wizardStartBtn" class="btn-primary btn-sm">▶ Start Training</button>
+        <div class="wizard-secondary-btns">
+          <button id="wizardStopBtn" class="btn-secondary btn-sm" disabled>⏹ Stop</button>
+          <button id="wizardResumeBtn" class="btn-secondary btn-sm" disabled style="display:none">▶ Resume</button>
+          <button id="wizardSkipBtn" class="btn-secondary btn-sm" disabled>⏭ Skip</button>
+        </div>
+      </div>
+
+      <!-- Train + Export (hidden until enough data) -->
+      <div class="wizard-actions">
+        <button id="trainModelBtn" class="btn-primary btn-sm" disabled>🧠 Train Model <span id="trainReadyCount">(0/5 ready)</span></button>
+        <div class="record-actions">
+          <button id="exportDataBtn" class="btn-secondary btn-sm">Export</button>
+          <button id="importDataBtn" class="btn-secondary btn-sm">Import</button>
+        </div>
+        <input type="file" id="importFileInput" accept=".json" style="display:none">
+      </div>
     </div>
 
     <h3 class="section-title">CONTROLS</h3>

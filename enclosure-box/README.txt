@@ -1,0 +1,4 @@
+More customizable snap-fit electronics project box enclosure by GentleSilicon on Thingiverse: https://www.thingiverse.com/thing:5247577
+
+Summary:
+All credit to 0707070 for the original OpenSCAD file which I modified as follows:fix warnings about polygon(center=true)misc cleanup and hull rather than minkowskiindependent size of hooks on x/y sideoption to remove x or y hooks entirelyoption for slots to at least attempt to open the box up againrounding radius specifies the interior radius, as I frequently want sharp angles on the inside. The outside radius will follow that curve with the specified wall thickness

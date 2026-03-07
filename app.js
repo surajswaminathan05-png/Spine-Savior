@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { PostureRecorder, PostureClassifier, PostureCoach, POSTURE_DISPLAY } from './posture-ml.js';
 
 // ============================================================
 //  CONFIGURATION — Biomechanical Data Tables
@@ -95,14 +96,41 @@ class SpineSavior {
         this.renderer = null;
         this.controls = null;
         this.modelLoaded = false;
+
+        // ML / AI state
+        this.recorder = new PostureRecorder();
+        this.classifier = new PostureClassifier();
+        this.coach = new PostureCoach();
+        this.currentLabel = null;        // active recording label
+        this.lastClassification = null;
+        this.classifyCounter = 0;        // frame counter for classification cadence
+
+        // Training wizard state
+        this.wizardActive = false;       // guided mode active?
+        this.wizardQueue = [];           // posture labels still to record
+        this.wizardRecordStart = 0;      // timestamp when current label started
+        this.targetFrames = 5400;        // 90s × 60fps per posture
+        this.minFrames = 1800;           // 30s × 60fps minimum to mark "ready"
+        this.postureStatus = {};         // { label: 'idle' | 'recording' | 'ready' }
+        this.postureFrameCounts = {};    // { label: frameCount }
+        this.lastStoppedLabel = null;    // tracks what was stopped for Resume
+
         this.init();
     }
 
-    init() {
+    async init() {
         this.setupScene();
         this.loadSpineModel();
         this.setupUI();
+        this.setupMLUI();
         this.animate();
+
+        // Try to load previously trained model
+        const loaded = await this.classifier.loadSaved();
+        if (loaded) {
+            document.getElementById('mlStatus').textContent = 'Model: ready ✓';
+            document.getElementById('mlStatus').classList.add('ready');
+        }
     }
 
     // ==========================================================
@@ -603,6 +631,17 @@ class SpineSavior {
         btn.style.background = 'rgba(124,179,66,0.2)';
         btn.style.borderColor = '#7CB342';
         setTimeout(() => { btn.style.background = ''; btn.style.borderColor = ''; }, 800);
+        document.getElementById('resetCalibBtn').style.display = '';
+    }
+
+    resetCalibration() {
+        this.baseline = {};
+        document.getElementById('calibStatus').textContent = 'Calibration: none';
+        document.getElementById('resetCalibBtn').style.display = 'none';
+        const btn = document.getElementById('calibrateBtn');
+        btn.style.background = 'rgba(255,82,82,0.2)';
+        btn.style.borderColor = '#FF5252';
+        setTimeout(() => { btn.style.background = ''; btn.style.borderColor = ''; }, 800);
     }
 
     resetCamera() {
@@ -633,6 +672,41 @@ class SpineSavior {
             this.lastDataRateTime = now;
             document.getElementById('dataRate').textContent = this.dataRate + ' Hz';
         }
+        // ML: Record frame if label is active
+        if (this.currentLabel && this.recorder) {
+            this.recorder.pushFrame(this.sensorData, this.currentLabel);
+            // Track per-posture frame counts
+            this.postureFrameCounts[this.currentLabel] = (this.postureFrameCounts[this.currentLabel] || 0) + 1;
+
+            // Update wizard UI every 30 frames (~0.5s)
+            if (this.frameCount % 30 === 0) {
+                this.updateWizardProgress();
+            }
+
+            // Auto-stop when target reached
+            if (this.postureFrameCounts[this.currentLabel] >= this.targetFrames) {
+                this.completeCurrentPosture();
+            }
+        }
+
+        // ML: Push frame into classifier buffer + classify every 60 frames
+        if (this.classifier) {
+            this.classifier.pushFrame(this.sensorData);
+            this.classifyCounter++;
+            if (this.classifier.isReady && this.classifyCounter >= 60) {
+                this.classifyCounter = 0;
+                this.classifier.classify().then(result => {
+                    if (!result) return;
+                    this.lastClassification = result;
+                    document.getElementById('mlPrediction').textContent = result.display;
+                    document.getElementById('mlConfidence').textContent =
+                        `${Math.round(result.confidence * 100)}% confidence`;
+                    // Trigger AI coach
+                    this.coach.onClassification(result, this.sensorData);
+                });
+            }
+        }
+
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
     }
@@ -650,6 +724,7 @@ class SpineSavior {
             else if (!this.port) { this.updateConnectionUI('disconnected'); this.dataReady = false; }
         });
         document.getElementById('calibrateBtn').addEventListener('click', () => this.calibrate());
+        document.getElementById('resetCalibBtn').addEventListener('click', () => this.resetCalibration());
         window.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
             switch (e.key.toLowerCase()) {
@@ -662,6 +737,280 @@ class SpineSavior {
                 case 'r': this.resetCamera(); break;
             }
         });
+    }
+
+    // ==========================================================
+    //  TRAINING WIZARD
+    // ==========================================================
+    setupMLUI() {
+        const labels = ['normal', 'forward_head', 'slouching', 'lordosis', 'lateral_tilt'];
+        // Initialize posture tracking
+        for (const l of labels) {
+            this.postureStatus[l] = 'idle';
+            this.postureFrameCounts[l] = 0;
+        }
+
+        // Click a step row to manually record that posture
+        document.querySelectorAll('.wizard-step').forEach(row => {
+            row.addEventListener('click', () => {
+                const label = row.dataset.label;
+                if (this.currentLabel === label) {
+                    this.stopRecordingCurrent();
+                } else {
+                    this.startRecordingPosture(label);
+                }
+            });
+        });
+
+        // Start guided training (auto-advance through all)
+        document.getElementById('wizardStartBtn').addEventListener('click', () => {
+            this.wizardActive = true;
+            this.wizardQueue = labels.filter(l => this.postureStatus[l] !== 'ready');
+            if (this.wizardQueue.length === 0) {
+                document.getElementById('wizardInstruction').textContent = 'All postures recorded! Click Train Model.';
+                return;
+            }
+            document.getElementById('wizardStartBtn').disabled = true;
+            document.getElementById('wizardStopBtn').disabled = false;
+            document.getElementById('wizardSkipBtn').disabled = false;
+            this.startRecordingPosture(this.wizardQueue.shift());
+        });
+
+        // Stop current recording — pause, do NOT auto-advance
+        document.getElementById('wizardStopBtn').addEventListener('click', () => {
+            this.lastStoppedLabel = this.currentLabel;
+            this.stopRecordingCurrent();
+            // Show Resume button, hide Stop
+            document.getElementById('wizardStopBtn').style.display = 'none';
+            document.getElementById('wizardResumeBtn').style.display = '';
+            document.getElementById('wizardResumeBtn').disabled = false;
+            document.getElementById('wizardInstruction').textContent =
+                `Paused. Resume recording or Skip to next posture.`;
+        });
+
+        // Resume recording the last stopped posture
+        document.getElementById('wizardResumeBtn').addEventListener('click', () => {
+            if (this.lastStoppedLabel) {
+                this.startRecordingPosture(this.lastStoppedLabel);
+                document.getElementById('wizardResumeBtn').style.display = 'none';
+                document.getElementById('wizardStopBtn').style.display = '';
+                document.getElementById('wizardStopBtn').disabled = false;
+            }
+        });
+
+        // Skip current posture — advance to next
+        document.getElementById('wizardSkipBtn').addEventListener('click', () => {
+            this.currentLabel = null;
+            this.lastStoppedLabel = null;
+            this.updateStepUI();
+            // Reset button visibility
+            document.getElementById('wizardResumeBtn').style.display = 'none';
+            document.getElementById('wizardStopBtn').style.display = '';
+            if (this.wizardActive) this.advanceWizard();
+        });
+
+        // Per-posture reset buttons
+        document.querySelectorAll('.step-reset').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation(); // don't trigger the row click
+                const label = btn.dataset.label;
+                // If currently recording this posture, stop first
+                if (this.currentLabel === label) {
+                    this.currentLabel = null;
+                }
+                // Clear frames for this posture from the recorder
+                this.recorder.removeLabel(label);
+                this.postureFrameCounts[label] = 0;
+                this.postureStatus[label] = 'idle';
+                this.updateStepUI();
+                this.updateTrainButton();
+                document.getElementById('wizardInstruction').textContent =
+                    `Reset "${label}" — ready to re-record.`;
+            });
+        });
+
+        // Export
+        document.getElementById('exportDataBtn').addEventListener('click', () => {
+            if (this.recorder.frameCount === 0) {
+                document.getElementById('wizardInstruction').textContent = 'No data to export!';
+                return;
+            }
+            this.recorder.exportJSON();
+            document.getElementById('wizardInstruction').textContent = `Exported ${this.recorder.frameCount} frames`;
+        });
+
+        // Import
+        document.getElementById('importDataBtn').addEventListener('click', () => {
+            document.getElementById('importFileInput').click();
+        });
+        document.getElementById('importFileInput').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                const count = this.recorder.importJSON(evt.target.result);
+                // Recalculate per-posture frame counts from imported data
+                const counts = this.recorder.getFrameCountByLabel();
+                for (const l of labels) {
+                    this.postureFrameCounts[l] = counts[l] || 0;
+                    if (this.postureFrameCounts[l] >= this.minFrames) this.postureStatus[l] = 'ready';
+                }
+                this.updateStepUI();
+                this.updateTrainButton();
+                document.getElementById('wizardInstruction').textContent = `Imported ${count} frames`;
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        });
+
+        // Train
+        document.getElementById('trainModelBtn').addEventListener('click', async () => {
+            const statusEl = document.getElementById('mlStatus');
+            const trainBtn = document.getElementById('trainModelBtn');
+            trainBtn.disabled = true;
+            statusEl.textContent = 'Training...';
+            statusEl.classList.remove('ready');
+            document.getElementById('wizardInstruction').textContent = 'Training model — please wait...';
+
+            const result = await this.classifier.train(
+                this.recorder,
+                (epoch, total, logs) => {
+                    const pct = Math.round((epoch / total) * 100);
+                    statusEl.textContent = `Training: epoch ${epoch}/${total} — acc: ${(logs.acc * 100).toFixed(1)}%`;
+                    document.getElementById('wizardInstruction').textContent =
+                        `Training ${pct}% — epoch ${epoch}/${total}`;
+                }
+            );
+
+            this.updateTrainButton();
+            if (result.success) {
+                statusEl.textContent = `Model: ready ✓ (${result.accuracy}% acc, ${result.samples} samples)`;
+                statusEl.classList.add('ready');
+                document.getElementById('wizardInstruction').textContent =
+                    `✅ Model trained! ${result.accuracy}% accuracy on ${result.samples} samples. Live classification active.`;
+            } else {
+                statusEl.textContent = `Training failed: ${result.error}`;
+                document.getElementById('wizardInstruction').textContent = `❌ ${result.error}`;
+            }
+        });
+    }
+
+    startRecordingPosture(label) {
+        this.currentLabel = label;
+        this.wizardRecordStart = performance.now();
+        this.postureStatus[label] = 'recording';
+
+        const displayNames = {
+            normal: 'Normal (upright)', forward_head: 'Forward Head',
+            slouching: 'Slouching', lordosis: 'Lordosis (arched back)',
+            lateral_tilt: 'Lateral Tilt (lean sideways)',
+        };
+        document.getElementById('wizardInstruction').textContent =
+            `Sit in "${displayNames[label]}" posture...`;
+        document.getElementById('wizardStopBtn').disabled = false;
+        document.getElementById('wizardSkipBtn').disabled = false;
+        this.updateStepUI();
+    }
+
+    stopRecordingCurrent() {
+        if (!this.currentLabel) return;
+        const label = this.currentLabel;
+        const frames = this.postureFrameCounts[label] || 0;
+        if (frames >= this.minFrames) {
+            this.postureStatus[label] = 'ready';
+        } else {
+            this.postureStatus[label] = frames > 0 ? 'partial' : 'idle';
+        }
+        this.currentLabel = null;
+        this.updateStepUI();
+        this.updateTrainButton();
+    }
+
+    completeCurrentPosture() {
+        if (!this.currentLabel) return;
+        this.postureStatus[this.currentLabel] = 'ready';
+        this.currentLabel = null;
+        this.updateStepUI();
+        this.updateTrainButton();
+        if (this.wizardActive) this.advanceWizard();
+    }
+
+    advanceWizard() {
+        if (this.wizardQueue.length > 0) {
+            const next = this.wizardQueue.shift();
+            this.startRecordingPosture(next);
+        } else {
+            // All done
+            this.wizardActive = false;
+            document.getElementById('wizardStartBtn').disabled = false;
+            document.getElementById('wizardStopBtn').disabled = true;
+            document.getElementById('wizardSkipBtn').disabled = true;
+            document.getElementById('wizardInstruction').textContent =
+                'All postures recorded! Click 🧠 Train Model below.';
+            document.getElementById('wizardTimer').textContent = '';
+        }
+    }
+
+    updateWizardProgress() {
+        if (!this.currentLabel) return;
+        const label = this.currentLabel;
+        const frames = this.postureFrameCounts[label] || 0;
+        const pct = Math.min(100, Math.round((frames / this.targetFrames) * 100));
+        const elapsed = Math.round(frames / 60);
+        const target = Math.round(this.targetFrames / 60);
+
+        // Update progress bar
+        const fill = document.getElementById(`fill-${label}`);
+        const pctEl = document.getElementById(`pct-${label}`);
+        if (fill) fill.style.width = pct + '%';
+        if (pctEl) pctEl.textContent = pct + '%';
+
+        // Update timer
+        document.getElementById('wizardTimer').textContent =
+            `▓${'▓'.repeat(Math.floor(pct / 5))}${'░'.repeat(20 - Math.floor(pct / 5))} ${elapsed}s / ${target}s`;
+    }
+
+    updateStepUI() {
+        const labels = ['normal', 'forward_head', 'slouching', 'lordosis', 'lateral_tilt'];
+        for (const label of labels) {
+            const row = document.getElementById(`step-${label}`);
+            const icon = row?.querySelector('.step-icon');
+            const fill = document.getElementById(`fill-${label}`);
+            const pctEl = document.getElementById(`pct-${label}`);
+            if (!row || !icon) continue;
+
+            const status = this.postureStatus[label];
+            const frames = this.postureFrameCounts[label] || 0;
+            const pct = Math.min(100, Math.round((frames / this.targetFrames) * 100));
+
+            // Update fill bar
+            if (fill) fill.style.width = pct + '%';
+            if (pctEl) pctEl.textContent = pct + '%';
+
+            // Update icon and row state
+            row.classList.remove('recording', 'ready', 'partial');
+            if (status === 'recording') {
+                icon.textContent = '🔴';
+                row.classList.add('recording');
+            } else if (status === 'ready') {
+                icon.textContent = '✅';
+                row.classList.add('ready');
+            } else if (status === 'partial') {
+                icon.textContent = '⚠️';
+                row.classList.add('partial');
+            } else {
+                icon.textContent = '⬜';
+            }
+        }
+    }
+
+    updateTrainButton() {
+        const labels = ['normal', 'forward_head', 'slouching', 'lordosis', 'lateral_tilt'];
+        const ready = labels.filter(l => this.postureStatus[l] === 'ready').length;
+        const btn = document.getElementById('trainModelBtn');
+        const countEl = document.getElementById('trainReadyCount');
+        if (countEl) countEl.textContent = `(${ready}/5 ready)`;
+        btn.disabled = ready < 2;
     }
 }
 

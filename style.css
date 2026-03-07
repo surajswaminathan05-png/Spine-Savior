@@ -233,6 +233,8 @@ html, body {
   top: 70px; right: 20px;
   width: 220px;
   z-index: 50;
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
 }
 .score-gauge {
   display: flex; justify-content: center;
@@ -286,6 +288,164 @@ html, body {
 .alert-item.warn { background: rgba(255,213,79,0.08); color: var(--accent-warn); }
 .alert-item.bad  { background: rgba(255,82,82,0.08);  color: var(--accent-bad); }
 .alert-item.good { background: rgba(105,240,174,0.08); color: var(--accent-good); }
+
+/* --- ML Classifier Panel --- */
+.ml-panel {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ml-status {
+  font-size: 10px; font-family: var(--mono);
+  color: var(--text-muted);
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+}
+.ml-status.ready { color: var(--accent-good); }
+.ml-prediction {
+  font-size: 16px; font-weight: 600;
+  color: var(--text-primary);
+  text-align: center;
+  padding: 8px 0 2px;
+}
+.ml-confidence {
+  font-size: 10px; font-family: var(--mono);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* --- Training Wizard Panel --- */
+.wizard-panel {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.wizard-steps {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.wizard-step {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(255,255,255,0.02);
+}
+.wizard-step:hover {
+  background: rgba(255,255,255,0.06);
+}
+.wizard-step.recording {
+  background: rgba(255, 82, 82, 0.08);
+  animation: pulse-record 1.5s ease-in-out infinite;
+}
+.wizard-step.ready {
+  background: rgba(105, 240, 174, 0.06);
+}
+.wizard-step.partial {
+  background: rgba(255, 213, 79, 0.06);
+}
+.step-icon {
+  font-size: 12px; width: 18px; text-align: center; flex-shrink: 0;
+}
+.step-label {
+  font-size: 10px; font-weight: 500; color: var(--text-secondary);
+  width: 55px; flex-shrink: 0;
+}
+.step-bar {
+  flex: 1; height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px; overflow: hidden;
+}
+.step-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--accent-cervical), var(--accent-lumbar));
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.wizard-step.ready .step-fill {
+  background: var(--accent-good);
+}
+.wizard-step.recording .step-fill {
+  background: var(--accent-bad);
+}
+.step-pct {
+  font-size: 9px; font-family: var(--mono);
+  color: var(--text-muted); width: 28px; text-align: right; flex-shrink: 0;
+}
+.step-reset {
+  width: 16px; height: 16px;
+  font-size: 10px; line-height: 16px; text-align: center;
+  background: transparent; border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+  padding: 0; flex-shrink: 0;
+  border-radius: 3px;
+}
+.wizard-step:hover .step-reset { opacity: 0.6; }
+.step-reset:hover { opacity: 1 !important; color: var(--accent-bad); background: rgba(255,82,82,0.1); }
+
+/* Instruction + Timer */
+.wizard-instruction {
+  font-size: 11px; line-height: 1.4;
+  color: var(--text-primary);
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+  text-align: center;
+}
+.wizard-timer {
+  font-size: 10px; font-family: var(--mono);
+  color: var(--accent-cervical);
+  text-align: center;
+  letter-spacing: 0.5px;
+  min-height: 14px;
+}
+
+/* Wizard controls */
+.wizard-controls {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.wizard-secondary-btns {
+  display: flex; gap: 4px;
+}
+.wizard-secondary-btns .btn-sm { flex: 1; }
+
+/* Wizard actions (train + export/import) */
+.wizard-actions {
+  display: flex; flex-direction: column; gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-glass);
+}
+
+@keyframes pulse-record {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,82,82,0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(255,82,82,0.05); }
+}
+.record-actions {
+  display: flex; gap: 4px;
+}
+.btn-sm {
+  padding: 5px 10px !important;
+  font-size: 10px !important;
+  width: 100%;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+.coach-panel {
+  background: rgba(100, 255, 218, 0.04);
+  border: 1px solid rgba(100, 255, 218, 0.1);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.coach-message {
+  font-size: 12px; line-height: 1.5;
+  color: var(--text-primary);
+  font-style: italic;
+}
+
 
 /* --- Controls Legend --- */
 .controls-legend { display: flex; flex-direction: column; gap: 5px; }
