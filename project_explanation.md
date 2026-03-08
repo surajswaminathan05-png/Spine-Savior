@@ -12,12 +12,12 @@ We built a custom physical sensor harness that tracks the exact orientation of t
 *   **Sensors:** We use three **BNO055 9-DOF IMUs** (Inertial Measurement Units). These are smart accelerometer/gyroscope/magnetometer chips that calculate their absolute orientation in 3D space.
 *   **Placement:** The sensors correspond to the three main anatomical regions of the human spine: **Cervical** (neck), **Thoracic** (mid-back), and **Lumbar** (lower back).
 *   **Multiplexer:** A **TCA9548A I2C Multiplexer** acts as a traffic controller, allowing the three identical BNO055 sensors to communicate over a single data line.
-*   **Microcontroller:** An **ESP32** or **Arduino** acts as the system's brain, collecting the Euler angles (pitch, roll, heading) from all three sensors and instantaneously streaming them over a USB cable.
+*   **Microcontroller:** An **Arduino Nano 33 BLE** acts as the system's brain, collecting the Euler angles (pitch, roll, heading) from all three sensors and streaming them wirelessly over Bluetooth Low Energy (BLE).
 
 ## 2. The Software & 3D Visualization
 The frontend is a lightweight, blazing-fast web application that runs directly in your browser without requiring bulky software installation.
 
-*   **Web Serial API:** The browser securely connects directly to the USB hardware. No background servers are required; everything happens locally.
+*   **Web Bluetooth API:** The browser securely connects directly to the Arduino over Bluetooth Low Energy. No background servers, USB cables, or drivers are required; everything happens wirelessly and locally.
 *   **Graphics Engine:** **Three.js** is used to render a high-quality, anatomically accurate 3D model of a human spine (.GLB format) on a dark, studio-lit web canvas.
 *   **Vanilla Web Tech:** The interface is built entirely with plain **HTML, CSS, and JavaScript**.
 

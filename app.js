@@ -7,6 +7,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { PostureRecorder, PostureClassifier, PostureCoach, POSTURE_DISPLAY } from './posture-ml.js';
 
+const SPINE_SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+const SPINE_CHAR_UUID    = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
 // ============================================================
 //  CONFIGURATION — Biomechanical Data Tables
 //  Sources: PubMed ROM studies, Disney Research dynamics,
@@ -81,9 +84,8 @@ class SpineSavior {
         this.baseline = null;
         this.dataReady = false;
         this.joints = [];  // { group, region, regionIndex, globalIndex, flexWeight, romLimit, velocity, currentRot }
-        this.port = null;
-        this.reader = null;
-        this.keepReading = false;
+        this.device = null;
+        this.characteristic = null;
         this.simulationMode = false;
         this.frameCount = 0;
         this.lastFpsTime = performance.now();
@@ -354,67 +356,71 @@ class SpineSavior {
     }
 
     // ==========================================================
-    //  WEB SERIAL
+    //  WEB BLUETOOTH
     // ==========================================================
     async connect() {
-        if (!('serial' in navigator)) {
-            alert('Web Serial API not supported. Use Chrome 89+.');
+        if (!('bluetooth' in navigator)) {
+            alert('Web Bluetooth API not supported. Use Chrome 89+ or Edge.');
             return;
         }
         try {
-            this.port = await navigator.serial.requestPort();
-            await this.port.open({ baudRate: 115200 });
-            this.keepReading = true;
+            this.device = await navigator.bluetooth.requestDevice({
+                filters: [{ services: [SPINE_SERVICE_UUID] }],
+            });
+            this.device.addEventListener(
+                'gattserverdisconnected', () => this.onBleDisconnected()
+            );
+            const server = await this.device.gatt.connect();
+            const service = await server.getPrimaryService(SPINE_SERVICE_UUID);
+            this.characteristic = await service.getCharacteristic(SPINE_CHAR_UUID);
+            await this.characteristic.startNotifications();
+            this.characteristic.addEventListener(
+                'characteristicvaluechanged', (e) => this.handleBluetoothData(e)
+            );
             this.updateConnectionUI('connected');
-            this.readSerialLoop();
         } catch (err) {
-            console.error('Serial error:', err);
+            console.error('Bluetooth error:', err);
             this.updateConnectionUI('disconnected');
         }
     }
 
     async disconnect() {
-        this.keepReading = false;
-        if (this.reader) { try { await this.reader.cancel(); } catch (e) { } this.reader = null; }
-        if (this.port) { try { await this.port.close(); } catch (e) { } this.port = null; }
+        if (this.characteristic) {
+            try { await this.characteristic.stopNotifications(); } catch (e) {}
+            this.characteristic = null;
+        }
+        if (this.device?.gatt?.connected) {
+            this.device.gatt.disconnect();
+        }
+        this.device = null;
+        this.dataReady = false;
         this.updateConnectionUI('disconnected');
     }
 
-    async readSerialLoop() {
-        const decoder = new TextDecoderStream();
-        const closed = this.port.readable.pipeTo(decoder.writable);
-        this.reader = decoder.readable.getReader();
-        let buf = '';
-        try {
-            while (this.keepReading) {
-                const { value, done } = await this.reader.read();
-                if (done) break;
-                buf += value;
-                const lines = buf.split('\n');
-                buf = lines.pop();
-                for (const l of lines) this.processSerialLine(l.trim());
-            }
-        } catch (e) {
-            if (this.keepReading) console.error('Read error:', e);
-        } finally {
-            this.reader.releaseLock();
-            await closed.catch(() => { });
-        }
+    onBleDisconnected() {
+        console.log('BLE device disconnected');
+        this.device = null;
+        this.characteristic = null;
+        this.dataReady = false;
+        this.updateConnectionUI('disconnected');
     }
 
-    processSerialLine(line) {
-        if (!line) return;
-        if (/[a-zA-Z]/.test(line.replace(/[eE][-+]?\d+/g, ''))) return;
-        const parts = line.split(',');
-        if (parts.length !== 9) return;
-        const v = parts.map(s => parseFloat(s.trim()));
-        if (v.some(Number.isNaN)) return;
+    handleBluetoothData(event) {
+        const view = event.target.value;
+        if (view.byteLength !== 36) return;
 
-        // Direct assignment — spring-damper in updateSpine() handles all smoothing
         const d = this.sensorData;
-        d.thoracic.h = v[0]; d.thoracic.p = v[1]; d.thoracic.r = v[2]; // port 0 → thoracic
-        d.lumbar.h = v[3]; d.lumbar.p = v[4]; d.lumbar.r = v[5]; // port 2 → lumbar
-        d.cervical.h = v[6]; d.cervical.p = v[7]; d.cervical.r = v[8]; // port 3 → cervical
+        // Little-endian (ARM Cortex-M4)
+        d.thoracic.h = view.getFloat32(0,  true);
+        d.thoracic.p = view.getFloat32(4,  true);
+        d.thoracic.r = view.getFloat32(8,  true);
+        d.lumbar.h   = view.getFloat32(12, true);
+        d.lumbar.p   = view.getFloat32(16, true);
+        d.lumbar.r   = view.getFloat32(20, true);
+        d.cervical.h = view.getFloat32(24, true);
+        d.cervical.p = view.getFloat32(28, true);
+        d.cervical.r = view.getFloat32(32, true);
+
         this.dataReady = true;
         this.dataCount++;
     }
@@ -716,12 +722,12 @@ class SpineSavior {
     // ==========================================================
     setupUI() {
         document.getElementById('connectBtn').addEventListener('click', () => {
-            if (this.port) this.disconnect(); else this.connect();
+            if (this.device) this.disconnect(); else this.connect();
         });
         document.getElementById('simToggle').addEventListener('change', (e) => {
             this.simulationMode = e.target.checked;
             if (this.simulationMode) this.updateConnectionUI('simulating');
-            else if (!this.port) { this.updateConnectionUI('disconnected'); this.dataReady = false; }
+            else if (!this.device) { this.updateConnectionUI('disconnected'); this.dataReady = false; }
         });
         document.getElementById('calibrateBtn').addEventListener('click', () => this.calibrate());
         document.getElementById('resetCalibBtn').addEventListener('click', () => this.resetCalibration());
