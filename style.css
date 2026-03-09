@@ -446,6 +446,53 @@ html, body {
   font-style: italic;
 }
 
+/* --- Haptic Feedback Panel --- */
+.haptic-panel {
+  background: rgba(83, 109, 254, 0.04);
+  border: 1px solid rgba(83, 109, 254, 0.1);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.haptic-row {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.haptic-toggle {
+  display: flex; align-items: center; gap: 10px;
+  cursor: pointer; font-size: 12px; color: var(--text-secondary);
+  user-select: none;
+}
+.haptic-toggle input { display: none; }
+.haptic-toggle .toggle-slider {
+  width: 36px; height: 20px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  position: relative;
+  transition: background 0.3s ease;
+}
+.haptic-toggle .toggle-slider::after {
+  content: '';
+  position: absolute; top: 3px; left: 3px;
+  width: 14px; height: 14px;
+  background: var(--text-secondary);
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+.haptic-toggle input:checked + .toggle-slider {
+  background: rgba(83, 109, 254, 0.25);
+}
+.haptic-toggle input:checked + .toggle-slider::after {
+  left: 19px;
+  background: var(--accent-lumbar);
+  box-shadow: 0 0 6px var(--accent-lumbar);
+}
+.haptic-intensity {
+  font-family: var(--mono);
+  font-size: 12px; font-weight: 600;
+  color: var(--text-muted);
+  min-width: 36px; text-align: right;
+  transition: color 0.3s ease;
+}
+
 
 /* --- Controls Legend --- */
 .controls-legend { display: flex; flex-direction: column; gap: 5px; }

@@ -3,12 +3,21 @@
 #include <Adafruit_BNO055.h>
 #include <Adafruit_Sensor.h>
 
+// ── Hardware ──
+#define MOTOR_PIN 4
+
 // ── BLE UUIDs ──
 BLEService spineService("19b10000-e8f2-537e-4f6c-d104768a1214");
 BLECharacteristic spineChar(
     "19b10001-e8f2-537e-4f6c-d104768a1214",
     BLERead | BLENotify,
     36  // 9 floats × 4 bytes
+);
+
+// Haptic control — browser writes 0-255 intensity
+BLEByteCharacteristic hapticChar(
+    "19b10002-e8f2-537e-4f6c-d104768a1214",
+    BLEWrite | BLEWriteWithoutResponse
 );
 
 // ── Packed payload (exactly 36 bytes) ──
@@ -48,6 +57,10 @@ void setup() {
     Serial.begin(115200);
     Wire.begin();
 
+    // Haptic motor output
+    pinMode(MOTOR_PIN, OUTPUT);
+    analogWrite(MOTOR_PIN, 0);  // motor OFF at boot
+
     // Initialize each BNO055 through the multiplexer
     uint8_t ports[] = {PORT_THORACIC, PORT_LUMBAR, PORT_CERVICAL};
     for (uint8_t p : ports) {
@@ -67,6 +80,7 @@ void setup() {
     BLE.setLocalName("SpineSavior");
     BLE.setAdvertisedService(spineService);
     spineService.addCharacteristic(spineChar);
+    spineService.addCharacteristic(hapticChar);
     BLE.addService(spineService);
     BLE.advertise();
     Serial.println("BLE advertising as 'SpineSavior'...");
@@ -77,13 +91,27 @@ void loop() {
     if (central) {
         Serial.print("Connected: "); Serial.println(central.address());
         while (central.connected()) {
-            readSensor(PORT_THORACIC, payload.thoracicH, payload.thoracicP, payload.thoracicR);
-            readSensor(PORT_LUMBAR,   payload.lumbarH,   payload.lumbarP,   payload.lumbarR);
-            readSensor(PORT_CERVICAL, payload.cervicalH, payload.cervicalP, payload.cervicalR);
+            // Check for haptic command from browser
+            if (hapticChar.written()) {
+                uint8_t intensity = hapticChar.value();
+                analogWrite(MOTOR_PIN, intensity);
+                Serial.print("Haptic: "); Serial.println(intensity);
+            }
+
+            float h, p, r;
+            readSensor(PORT_THORACIC, h, p, r);
+            payload.thoracicH = h; payload.thoracicP = p; payload.thoracicR = r;
+
+            readSensor(PORT_LUMBAR, h, p, r);
+            payload.lumbarH = h; payload.lumbarP = p; payload.lumbarR = r;
+
+            readSensor(PORT_CERVICAL, h, p, r);
+            payload.cervicalH = h; payload.cervicalP = p; payload.cervicalR = r;
 
             spineChar.writeValue((byte*)&payload, sizeof(payload));
             delay(16);  // ~60 Hz
         }
+        analogWrite(MOTOR_PIN, 0);  // safety: motor off on disconnect
         Serial.println("Disconnected.");
     }
 }

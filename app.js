@@ -9,6 +9,7 @@ import { PostureRecorder, PostureClassifier, PostureCoach, POSTURE_DISPLAY } fro
 
 const SPINE_SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
 const SPINE_CHAR_UUID    = '19b10001-e8f2-537e-4f6c-d104768a1214';
+const HAPTIC_CHAR_UUID   = '19b10002-e8f2-537e-4f6c-d104768a1214';
 
 // ============================================================
 //  CONFIGURATION — Biomechanical Data Tables
@@ -86,6 +87,9 @@ class SpineSavior {
         this.joints = [];  // { group, region, regionIndex, globalIndex, flexWeight, romLimit, velocity, currentRot }
         this.device = null;
         this.characteristic = null;
+        this.hapticChar = null;          // BLE haptic write characteristic
+        this.hapticEnabled = true;       // user toggle for haptic feedback
+        this.lastHapticIntensity = 0;    // debounce: avoid redundant writes
         this.simulationMode = false;
         this.frameCount = 0;
         this.lastFpsTime = performance.now();
@@ -377,6 +381,16 @@ class SpineSavior {
             this.characteristic.addEventListener(
                 'characteristicvaluechanged', (e) => this.handleBluetoothData(e)
             );
+
+            // Discover haptic feedback characteristic (optional — may not exist on older firmware)
+            try {
+                this.hapticChar = await service.getCharacteristic(HAPTIC_CHAR_UUID);
+                console.log('[Haptic] Characteristic discovered ✓');
+            } catch (e) {
+                console.warn('[Haptic] Characteristic not found — haptic feedback disabled');
+                this.hapticChar = null;
+            }
+
             this.updateConnectionUI('connected');
         } catch (err) {
             console.error('Bluetooth error:', err);
@@ -385,10 +399,16 @@ class SpineSavior {
     }
 
     async disconnect() {
+        // Turn off motor before disconnecting
+        if (this.hapticChar) {
+            try { await this.sendHapticFeedback(0); } catch (e) {}
+        }
         if (this.characteristic) {
             try { await this.characteristic.stopNotifications(); } catch (e) {}
             this.characteristic = null;
         }
+        this.hapticChar = null;
+        this.lastHapticIntensity = 0;
         if (this.device?.gatt?.connected) {
             this.device.gatt.disconnect();
         }
@@ -401,8 +421,44 @@ class SpineSavior {
         console.log('BLE device disconnected');
         this.device = null;
         this.characteristic = null;
+        this.hapticChar = null;
+        this.lastHapticIntensity = 0;
         this.dataReady = false;
         this.updateConnectionUI('disconnected');
+        // Update haptic display
+        const el = document.getElementById('hapticIntensity');
+        if (el) el.textContent = 'OFF';
+    }
+
+    /**
+     * Send haptic intensity to the Arduino via BLE write.
+     * @param {number} intensity - 0 (off) to 255 (max vibration)
+     */
+    async sendHapticFeedback(intensity) {
+        if (!this.hapticChar) return;
+        // Allow intensity=0 through even when disabled (for motor shutoff)
+        if (!this.hapticEnabled && intensity !== 0) return;
+
+        // Clamp to uint8 range
+        intensity = Math.max(0, Math.min(255, Math.round(intensity)));
+
+        // Debounce: don't write if intensity hasn't changed
+        if (intensity === this.lastHapticIntensity) return;
+        this.lastHapticIntensity = intensity;
+
+        // Update UI display
+        const el = document.getElementById('hapticIntensity');
+        if (el) {
+            el.textContent = intensity === 0 ? 'OFF' : `${Math.round(intensity / 255 * 100)}%`;
+        }
+
+        try {
+            await this.hapticChar.writeValueWithoutResponse(
+                new Uint8Array([intensity])
+            );
+        } catch (e) {
+            console.warn('[Haptic] Write failed:', e.message);
+        }
     }
 
     handleBluetoothData(event) {
@@ -433,20 +489,20 @@ class SpineSavior {
         const breath = Math.sin(t * Math.PI * 2 * 0.15);
         const d = this.sensorData;
 
-        // Cervical: high ROM for axial rotation (C1-C2), moderate flex/ext
-        d.cervical.h = Math.sin(t * 0.3) * 8;
-        d.cervical.p = breath * 4 + Math.sin(t * 0.7) * 3;
-        d.cervical.r = Math.sin(t * 0.5) * 4;
+        // Cervical: very subtle micro-movements (near-perfect posture)
+        d.cervical.h = Math.sin(t * 0.3) * 0.5;
+        d.cervical.p = breath * 0.4 + Math.sin(t * 0.7) * 0.3;
+        d.cervical.r = Math.sin(t * 0.5) * 0.3;
 
-        // Thoracic: low flex/ext (rib cage constraint), moderate axial rotation
-        d.thoracic.h = Math.sin(t * 0.25) * 6;
-        d.thoracic.p = breath * 2 + Math.sin(t * 0.4) * 1.5;
-        d.thoracic.r = Math.sin(t * 0.6) * 4;
+        // Thoracic: minimal sway (stable upright)
+        d.thoracic.h = Math.sin(t * 0.25) * 0.4;
+        d.thoracic.p = breath * 0.3 + Math.sin(t * 0.4) * 0.2;
+        d.thoracic.r = Math.sin(t * 0.6) * 0.3;
 
-        // Lumbar: high flex/ext, almost no axial rotation
-        d.lumbar.h = Math.sin(t * 0.2) * 1.5;
-        d.lumbar.p = breath * 6 + Math.sin(t * 0.35) * 4;
-        d.lumbar.r = Math.sin(t * 0.45) * 3;
+        // Lumbar: gentle breathing motion only
+        d.lumbar.h = Math.sin(t * 0.2) * 0.3;
+        d.lumbar.p = breath * 0.5 + Math.sin(t * 0.35) * 0.3;
+        d.lumbar.r = Math.sin(t * 0.45) * 0.3;
 
         this.dataReady = true;
     }
@@ -569,6 +625,18 @@ class SpineSavior {
         document.getElementById('lR').textContent = d.lumbar.r.toFixed(1);
 
         const score = this.getPostureScore();
+
+        // Haptic fallback: if ML model isn't ready, use posture score
+        // Throttle to ~1Hz (every 60 frames via classifyCounter) to avoid excessive calls
+        if (!this.classifier.isReady && this.hapticChar && this.classifyCounter % 60 === 0) {
+            if (score > 60) {
+                this.sendHapticFeedback(0);
+            } else {
+                // Invert score to intensity: score 0 → max buzz, score 60 → gentle
+                const intensity = Math.round(255 * (1 - score / 60));
+                this.sendHapticFeedback(Math.max(80, intensity));
+            }
+        }
         const circ = 2 * Math.PI * 52;
         document.getElementById('gaugeFill').style.strokeDashoffset = circ * (1 - score / 100);
         document.getElementById('scoreValue').textContent = score;
@@ -709,6 +777,16 @@ class SpineSavior {
                         `${Math.round(result.confidence * 100)}% confidence`;
                     // Trigger AI coach
                     this.coach.onClassification(result, this.sensorData);
+
+                    // Haptic feedback: vibrate proportional to how bad posture is
+                    if (result.label === 'normal') {
+                        this.sendHapticFeedback(0);
+                    } else {
+                        // Scale intensity by confidence: more confident = stronger buzz
+                        // Min 80 (perceptible), max 255 (full)
+                        const intensity = Math.round(80 + result.confidence * 175);
+                        this.sendHapticFeedback(intensity);
+                    }
                 });
             }
         }
@@ -743,6 +821,19 @@ class SpineSavior {
                 case 'r': this.resetCamera(); break;
             }
         });
+
+        // Haptic toggle
+        const hapticToggle = document.getElementById('hapticToggle');
+        if (hapticToggle) {
+            hapticToggle.addEventListener('change', (e) => {
+                this.hapticEnabled = e.target.checked;
+                if (!this.hapticEnabled) {
+                    this.sendHapticFeedback(0); // immediately stop motor
+                    const el = document.getElementById('hapticIntensity');
+                    if (el) el.textContent = 'OFF';
+                }
+            });
+        }
     }
 
     // ==========================================================
