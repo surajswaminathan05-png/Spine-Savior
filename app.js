@@ -78,13 +78,15 @@ const CONFIG = {
 class SpineSavior {
     constructor() {
         this.sensorData = {
-            cervical: { h: 0, p: 0, r: 0 },
-            thoracic: { h: 0, p: 0, r: 0 },
-            lumbar: { h: 0, p: 0, r: 0 },
+            cervical: { h: 0, p: 0, r: 0, quat: new THREE.Quaternion() },
+            thoracic: { h: 0, p: 0, r: 0, quat: new THREE.Quaternion() },
+            lumbar:   { h: 0, p: 0, r: 0, quat: new THREE.Quaternion() },
         };
         this.baseline = null;
+        this.calibrationQuats = null;    // stored per-sensor quaternions at calibration time
+        this.quaternionMode = false;     // true when receiving 48-byte quaternion payload
         this.dataReady = false;
-        this.joints = [];  // { group, region, regionIndex, globalIndex, flexWeight, romLimit, velocity, currentRot }
+        this.joints = [];  // { group, region, regionIndex, globalIndex, flexWeight, romLimit, currentQuat }
         this.device = null;
         this.characteristic = null;
         this.hapticChar = null;          // BLE haptic write characteristic
@@ -103,6 +105,8 @@ class SpineSavior {
         this.renderer = null;
         this.controls = null;
         this.modelLoaded = false;
+        this.spineRoot = null;           // THREE.Group wrapping GLTF root for global orientation
+        this.rootCurrentQuat = new THREE.Quaternion(); // SLERP state for global tilt
 
         // ML / AI state
         this.recorder = new PostureRecorder();
@@ -260,8 +264,10 @@ class SpineSavior {
             });
         });
 
-        // ---- Step 2: Add the entire GLTF scene to our scene (preserving its graph) ----
-        this.scene.add(root);
+        // ---- Step 2: Wrap in spineRoot group for global orientation control ----
+        this.spineRoot = new THREE.Group();
+        this.spineRoot.add(root);
+        this.scene.add(this.spineRoot);
 
         // ---- Step 3: Sort meshes by Y center ----
         meshInfos.sort((a, b) => a.yCenter - b.yCenter);
@@ -341,7 +347,9 @@ class SpineSavior {
                 restPitch: 0,
                 flexWeight: CONFIG.flexWeights[region][regionIndex] || (1 / CONFIG.flexWeights[region].length),
                 romLimit: CONFIG.romLimits[region][regionIndex] || [10, 10, 10],
-                // Spring-damper per-axis state
+                // SLERP smoothing state (replaces spring-damper for quaternion pipeline)
+                currentQuat: new THREE.Quaternion(),
+                // Legacy spring-damper per-axis state (for Euler fallback)
                 velocity: { x: 0, y: 0, z: 0 },
                 currentRot: { x: 0, y: 0, z: 0 },
             });
@@ -464,19 +472,40 @@ class SpineSavior {
 
     handleBluetoothData(event) {
         const view = event.target.value;
-        if (view.byteLength !== 36) return;
-
         const d = this.sensorData;
-        // Little-endian (ARM Cortex-M4)
-        d.thoracic.h = view.getFloat32(0,  true);
-        d.thoracic.p = view.getFloat32(4,  true);
-        d.thoracic.r = view.getFloat32(8,  true);
-        d.lumbar.h   = view.getFloat32(12, true);
-        d.lumbar.p   = view.getFloat32(16, true);
-        d.lumbar.r   = view.getFloat32(20, true);
-        d.cervical.h = view.getFloat32(24, true);
-        d.cervical.p = view.getFloat32(28, true);
-        d.cervical.r = view.getFloat32(32, true);
+
+        if (view.byteLength === 48) {
+            // ═══ QUATERNION MODE (new firmware) ═══
+            this.quaternionMode = true;
+            for (const [region, offset] of [['thoracic', 0], ['lumbar', 16], ['cervical', 32]]) {
+                const w = view.getFloat32(offset,      true);  // little-endian (ARM Cortex-M4)
+                const x = view.getFloat32(offset + 4,  true);
+                const y = view.getFloat32(offset + 8,  true);
+                const z = view.getFloat32(offset + 12, true);
+                // BNO055 ENU → Three.js Y-up axis conversion
+                d[region].quat.set(x, z, -y, w);
+                // Back-convert to Euler for UI display, ML pipeline, and coach
+                // MUST use 'YXZ' to match BNO055's native Euler decomposition order
+                const euler = new THREE.Euler().setFromQuaternion(d[region].quat, 'YXZ');
+                d[region].h = THREE.MathUtils.radToDeg(euler.y);
+                d[region].p = THREE.MathUtils.radToDeg(euler.x);
+                d[region].r = THREE.MathUtils.radToDeg(euler.z);
+            }
+        } else if (view.byteLength === 36) {
+            // ═══ LEGACY EULER MODE (old firmware) ═══
+            this.quaternionMode = false;
+            d.thoracic.h = view.getFloat32(0,  true);
+            d.thoracic.p = view.getFloat32(4,  true);
+            d.thoracic.r = view.getFloat32(8,  true);
+            d.lumbar.h   = view.getFloat32(12, true);
+            d.lumbar.p   = view.getFloat32(16, true);
+            d.lumbar.r   = view.getFloat32(20, true);
+            d.cervical.h = view.getFloat32(24, true);
+            d.cervical.p = view.getFloat32(28, true);
+            d.cervical.r = view.getFloat32(32, true);
+        } else {
+            return; // unknown payload size — ignore
+        }
 
         this.dataReady = true;
         this.dataCount++;
@@ -487,52 +516,107 @@ class SpineSavior {
     // ==========================================================
     updateSimulation(time) {
         const t = time * 0.001;
-        const breath = Math.sin(t * Math.PI * 2 * 0.15);
         const d = this.sensorData;
 
-        // Cervical: very subtle micro-movements (near-perfect posture)
-        d.cervical.h = Math.sin(t * 0.3) * 0.5;
-        d.cervical.p = breath * 0.4 + Math.sin(t * 0.7) * 0.3;
-        d.cervical.r = Math.sin(t * 0.5) * 0.3;
+        // Slow global forward bend cycle: ±30° over ~20s
+        const globalBend = Math.sin(t * 0.05) * (Math.PI / 6);
+        // Breathing cycle
+        const breath = Math.sin(t * Math.PI * 2 * 0.15);
 
-        // Thoracic: minimal sway (stable upright)
-        d.thoracic.h = Math.sin(t * 0.25) * 0.4;
-        d.thoracic.p = breath * 0.3 + Math.sin(t * 0.4) * 0.2;
-        d.thoracic.r = Math.sin(t * 0.6) * 0.3;
+        // Per-region micro-offsets (subtle local articulation on top of global tilt)
+        const offsets = {
+            lumbar:   breath * 0.008 + Math.sin(t * 0.35) * 0.005,
+            thoracic: breath * 0.005 + Math.sin(t * 0.4) * 0.003 + 0.02, // slight extra kyphosis
+            cervical: breath * 0.006 + Math.sin(t * 0.7) * 0.005 - 0.015, // slight extension
+        };
 
-        // Lumbar: gentle breathing motion only
-        d.lumbar.h = Math.sin(t * 0.2) * 0.3;
-        d.lumbar.p = breath * 0.5 + Math.sin(t * 0.35) * 0.3;
-        d.lumbar.r = Math.sin(t * 0.45) * 0.3;
+        for (const region of ['lumbar', 'thoracic', 'cervical']) {
+            // Build quaternion: global bend + region-specific micro-offset
+            const pitch = globalBend + offsets[region];
+            const yaw = Math.sin(t * 0.2 + (['lumbar', 'thoracic', 'cervical'].indexOf(region) * 0.7)) * 0.005;
+            const roll = Math.sin(t * 0.5 + (['lumbar', 'thoracic', 'cervical'].indexOf(region) * 0.5)) * 0.005;
 
+            const q = new THREE.Quaternion().setFromEuler(
+                new THREE.Euler(pitch, yaw, roll, 'YXZ')
+            );
+            d[region].quat.copy(q);
+
+            // Back-convert to Euler for ML pipeline + UI (must use 'YXZ')
+            const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+            d[region].h = THREE.MathUtils.radToDeg(e.y);
+            d[region].p = THREE.MathUtils.radToDeg(e.x);
+            d[region].r = THREE.MathUtils.radToDeg(e.z);
+        }
+
+        this.quaternionMode = true;
         this.dataReady = true;
     }
 
     // ==========================================================
     //  SPINE UPDATE (animation)
     // ==========================================================
+    // Compute relative quaternion: how 'current' has rotated since 'reference'
+    _relativeQuat(referenceQ, currentQ) {
+        return new THREE.Quaternion().multiplyQuaternions(
+            referenceQ.clone().invert(), currentQ
+        );
+    }
+
     updateSpine() {
         if (!this.dataReady || !this.modelLoaded) return;
         const d = this.sensorData;
-        const b = this.baseline || {
-            cervical: { h: 0, p: 0, r: 0 },
-            thoracic: { h: 0, p: 0, r: 0 },
-            lumbar: { h: 0, p: 0, r: 0 },
-        };
 
-        // 1. Compute per-region deltas (degrees, baseline-subtracted)
-        const regionDeltas = {};
-        for (const region of ['lumbar', 'thoracic', 'cervical']) {
-            regionDeltas[region] = {
-                p: d[region].p - b[region].p,  // pitch → flexion/extension
-                r: d[region].r - b[region].r,  // roll  → lateral bend
-                h: d[region].h - b[region].h,  // heading → axial rotation
-            };
+        // ══════════════════════════════════════════════════════════
+        // STAGE A: GLOBAL ROOT ORIENTATION (quaternion mode only)
+        // The lumbar sensor's absolute quaternion, relative to
+        // calibration, tilts the entire spine model in 3D space.
+        // ══════════════════════════════════════════════════════════
+        if (this.quaternionMode && this.calibrationQuats && this.spineRoot) {
+            const globalTilt = this._relativeQuat(
+                this.calibrationQuats.lumbar, d.lumbar.quat
+            );
+            // SLERP for smooth animation (~6 frame lag at 60fps)
+            this.rootCurrentQuat.slerp(globalTilt, 0.1);
+            this.spineRoot.quaternion.copy(this.rootCurrentQuat);
         }
 
-        const dt = 1.0 / 60.0;
-        const K = CONFIG.spring.stiffness;
-        const D = CONFIG.spring.damping;
+        // ══════════════════════════════════════════════════════════
+        // STAGE B: PER-VERTEBRA ARTICULATION
+        // Relative quaternion deltas → Euler → existing blending
+        // pipeline (Gaussian, flexibility, ROM clamping).
+        // ══════════════════════════════════════════════════════════
+
+        // Compute per-region deltas (Euler degrees)
+        const regionDeltas = {};
+        if (this.quaternionMode && this.calibrationQuats) {
+            // Quaternion mode: relative quaternion → Euler
+            for (const region of ['lumbar', 'thoracic', 'cervical']) {
+                const relQ = this._relativeQuat(
+                    this.calibrationQuats[region], d[region].quat
+                );
+                const e = new THREE.Euler().setFromQuaternion(relQ, 'YXZ');
+                regionDeltas[region] = {
+                    p: THREE.MathUtils.radToDeg(e.x),   // pitch → flexion/extension
+                    r: THREE.MathUtils.radToDeg(e.z),   // roll  → lateral bend
+                    h: THREE.MathUtils.radToDeg(e.y),   // heading → axial rotation
+                };
+            }
+        } else {
+            // Legacy Euler mode: simple baseline subtraction
+            const b = this.baseline || {
+                cervical: { h: 0, p: 0, r: 0 },
+                thoracic: { h: 0, p: 0, r: 0 },
+                lumbar: { h: 0, p: 0, r: 0 },
+            };
+            for (const region of ['lumbar', 'thoracic', 'cervical']) {
+                regionDeltas[region] = {
+                    p: d[region].p - b[region].p,
+                    r: d[region].r - b[region].r,
+                    h: d[region].h - b[region].h,
+                };
+            }
+        }
+
         const sigma = CONFIG.blendSigma;
         const sensorPos = CONFIG.sensorPositions;
 
@@ -564,23 +648,15 @@ class SpineSavior {
             const clampedR = THREE.MathUtils.clamp(scaledR, -maxLB, maxLB);
             const clampedH = THREE.MathUtils.clamp(scaledH, -maxAR, maxAR);
 
-            // 5. SPRING-DAMPER SMOOTHING — critically damped second-order system
-            const targets = {
-                x: THREE.MathUtils.degToRad(clampedP),
-                y: THREE.MathUtils.degToRad(-clampedH),
-                z: THREE.MathUtils.degToRad(clampedR),
-            };
-            for (const axis of ['x', 'y', 'z']) {
-                const error = targets[axis] - joint.currentRot[axis];
-                const accel = K * error - D * joint.velocity[axis];
-                joint.velocity[axis] += accel * dt;
-                joint.currentRot[axis] += joint.velocity[axis] * dt;
-            }
-
-            // 6. APPLY to the wrapper group
-            joint.group.rotation.x = joint.restPitch + joint.currentRot.x;
-            joint.group.rotation.y = joint.currentRot.y;
-            joint.group.rotation.z = joint.currentRot.z;
+            // 5. SLERP SMOOTHING — smooth per-joint rotation via quaternion interpolation
+            const targetQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+                joint.restPitch + THREE.MathUtils.degToRad(clampedP),
+                THREE.MathUtils.degToRad(-clampedH),
+                THREE.MathUtils.degToRad(clampedR),
+                'XYZ'
+            ));
+            joint.currentQuat.slerp(targetQuat, 0.1);
+            joint.group.quaternion.copy(joint.currentQuat);
         }
     }
 
@@ -589,14 +665,41 @@ class SpineSavior {
     // ==========================================================
     getPostureScore() {
         const d = this.sensorData;
+        const rom = CONFIG.regionalROM;
+
+        if (this.quaternionMode && this.calibrationQuats) {
+            // ═══ POSITION-INDEPENDENT SCORING (Xsens model) ═══
+            // Measures inter-segmental curvature change from calibration,
+            // not absolute deviation from a static upright baseline.
+            // Lying down with good alignment → high score.
+            // Slouching at desk → low score.
+            const q_lum  = this._relativeQuat(this.calibrationQuats.lumbar,   d.lumbar.quat);
+            const q_thor = this._relativeQuat(this.calibrationQuats.thoracic, d.thoracic.quat);
+            const q_cerv = this._relativeQuat(this.calibrationQuats.cervical, d.cervical.quat);
+
+            const lumE  = new THREE.Euler().setFromQuaternion(q_lum,  'YXZ');
+            const thorE = new THREE.Euler().setFromQuaternion(q_thor, 'YXZ');
+            const cervE = new THREE.Euler().setFromQuaternion(q_cerv, 'YXZ');
+
+            const toDeg = THREE.MathUtils.radToDeg;
+            const cervDev = Math.abs(toDeg(cervE.x)) / rom.cervical.flexExt +
+                Math.abs(toDeg(cervE.z)) / rom.cervical.latBend;
+            const thorDev = Math.abs(toDeg(thorE.x)) / rom.thoracic.flexExt +
+                Math.abs(toDeg(thorE.z)) / rom.thoracic.latBend;
+            const lumDev  = Math.abs(toDeg(lumE.x)) / rom.lumbar.flexExt +
+                Math.abs(toDeg(lumE.z)) / rom.lumbar.latBend;
+
+            const normalizedDev = (cervDev + thorDev + lumDev) / 6;
+            return Math.max(0, Math.round(100 * (1 - normalizedDev * 2)));
+        }
+
+        // ═══ LEGACY EULER SCORING (fallback) ═══
         const b = this.baseline || {
             cervical: { h: 0, p: 0, r: 0 },
             thoracic: { h: 0, p: 0, r: 0 },
             lumbar: { h: 0, p: 0, r: 0 },
         };
-        const rom = CONFIG.regionalROM;
 
-        // ROM-normalized deviation: how far off baseline as fraction of max ROM
         const cervDev = Math.abs(d.cervical.p - b.cervical.p) / rom.cervical.flexExt +
             Math.abs(d.cervical.r - b.cervical.r) / rom.cervical.latBend;
         const thorDev = Math.abs(d.thoracic.p - b.thoracic.p) / rom.thoracic.flexExt +
@@ -604,7 +707,6 @@ class SpineSavior {
         const lumDev = Math.abs(d.lumbar.p - b.lumbar.p) / rom.lumbar.flexExt +
             Math.abs(d.lumbar.r - b.lumbar.r) / rom.lumbar.latBend;
 
-        // Average normalized deviation (0 = perfect, 1 = at ROM limit)
         const normalizedDev = (cervDev + thorDev + lumDev) / 6;
         return Math.max(0, Math.round(100 * (1 - normalizedDev * 2)));
     }
@@ -703,6 +805,14 @@ class SpineSavior {
 
     calibrate() {
         this.baseline = JSON.parse(JSON.stringify(this.sensorData));
+        // Store reference quaternions for quaternion-mode calibration
+        if (this.quaternionMode) {
+            this.calibrationQuats = {
+                lumbar:   this.sensorData.lumbar.quat.clone(),
+                thoracic: this.sensorData.thoracic.quat.clone(),
+                cervical: this.sensorData.cervical.quat.clone(),
+            };
+        }
         document.getElementById('calibStatus').textContent = 'Calibration: ✅ set';
         const btn = document.getElementById('calibrateBtn');
         btn.style.background = 'rgba(124,179,66,0.2)';
@@ -713,6 +823,10 @@ class SpineSavior {
 
     resetCalibration() {
         this.baseline = {};
+        this.calibrationQuats = null;
+        // Reset global tilt to upright
+        this.rootCurrentQuat.identity();
+        if (this.spineRoot) this.spineRoot.quaternion.identity();
         document.getElementById('calibStatus').textContent = 'Calibration: none';
         document.getElementById('resetCalibBtn').style.display = 'none';
         const btn = document.getElementById('calibrateBtn');
@@ -735,6 +849,13 @@ class SpineSavior {
         const now = performance.now();
         if (this.simulationMode) this.updateSimulation(now);
         this.updateSpine();
+
+        // Camera follow: track the model's center through global tilt
+        if (this.spineRoot && this.quaternionMode) {
+            const modelCenter = new THREE.Vector3(0, 280, 0)
+                .applyQuaternion(this.spineRoot.quaternion);
+            this.controls.target.lerp(modelCenter, 0.05);
+        }
         this.frameCount++;
         if (this.frameCount % 4 === 0) this.updateUI();
         if (now - this.lastFpsTime >= 1000) {

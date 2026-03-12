@@ -75,7 +75,13 @@ export class PostureRecorder {
     }
 
     exportJSON() {
-        const blob = new Blob([JSON.stringify(this.frames)], { type: 'application/json' });
+        const payload = {
+            version: 2,
+            sensorMode: 'quaternion-derived-euler',
+            exportedAt: Date.now(),
+            frames: this.frames,
+        };
+        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -86,11 +92,23 @@ export class PostureRecorder {
 
     importJSON(jsonString) {
         try {
-            const imported = JSON.parse(jsonString);
-            if (Array.isArray(imported)) {
-                this.frames.push(...imported);
-                return imported.length;
+            const parsed = JSON.parse(jsonString);
+            // Handle both versioned format { version, frames } and legacy array format
+            let frames;
+            if (parsed.version) {
+                if (parsed.version !== 2) {
+                    console.warn(`[ML] Data version mismatch: got v${parsed.version}, expected v2. Retrain recommended.`);
+                }
+                frames = parsed.frames || [];
+            } else if (Array.isArray(parsed)) {
+                console.warn('[ML] Importing legacy (pre-quaternion) training data. Retrain recommended.');
+                frames = parsed;
+            } else {
+                console.error('[ML] Unrecognized data format');
+                return 0;
             }
+            this.frames.push(...frames);
+            return frames.length;
         } catch (e) {
             console.error('Import failed:', e);
         }
@@ -115,7 +133,7 @@ export class PostureClassifier {
         this.isTraining = false;
         this.windowSize = 60;  // 1 second at 60fps
         this.buffer = [];      // rolling buffer for live inference
-        this.modelKey = 'localstorage://posture-model';
+        this.modelKey = 'localstorage://posture-model-v2'; // v2: quaternion-derived Euler
     }
 
     // Try to load a previously trained model from localStorage
