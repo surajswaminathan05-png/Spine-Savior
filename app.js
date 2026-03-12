@@ -90,6 +90,7 @@ class SpineSavior {
         this.hapticChar = null;          // BLE haptic write characteristic
         this.hapticEnabled = true;       // user toggle for haptic feedback
         this.lastHapticIntensity = 0;    // debounce: avoid redundant writes
+        this.lastHapticCheck = 0;        // timestamp for haptic throttle (~1Hz)
         this.simulationMode = false;
         this.frameCount = 0;
         this.lastFpsTime = performance.now();
@@ -627,14 +628,16 @@ class SpineSavior {
         const score = this.getPostureScore();
 
         // Haptic fallback: if ML model isn't ready, use posture score
-        // Throttle to ~1Hz (every 60 frames via classifyCounter) to avoid excessive calls
-        if (!this.classifier.isReady && this.hapticChar && this.classifyCounter % 60 === 0) {
+        // Throttle to ~1Hz via timestamp to avoid excessive BLE writes
+        const now = performance.now();
+        if (!this.classifier.isReady && this.hapticChar && (now - this.lastHapticCheck > 1000)) {
+            this.lastHapticCheck = now;
             if (score > 60) {
-                this.sendHapticFeedback(0);
+                this.sendHapticFeedback(0).catch(e => console.warn('[Haptic] fallback write error:', e));
             } else {
                 // Invert score to intensity: score 0 → max buzz, score 60 → gentle
                 const intensity = Math.round(255 * (1 - score / 60));
-                this.sendHapticFeedback(Math.max(80, intensity));
+                this.sendHapticFeedback(Math.max(80, intensity)).catch(e => console.warn('[Haptic] fallback write error:', e));
             }
         }
         const circ = 2 * Math.PI * 52;
@@ -780,12 +783,12 @@ class SpineSavior {
 
                     // Haptic feedback: vibrate proportional to how bad posture is
                     if (result.label === 'normal') {
-                        this.sendHapticFeedback(0);
+                        this.sendHapticFeedback(0).catch(e => console.warn('[Haptic] ML write error:', e));
                     } else {
                         // Scale intensity by confidence: more confident = stronger buzz
                         // Min 80 (perceptible), max 255 (full)
                         const intensity = Math.round(80 + result.confidence * 175);
-                        this.sendHapticFeedback(intensity);
+                        this.sendHapticFeedback(intensity).catch(e => console.warn('[Haptic] ML write error:', e));
                     }
                 });
             }
