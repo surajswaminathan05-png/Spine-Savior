@@ -107,6 +107,8 @@ class SpineSavior {
         this.modelLoaded = false;
         this.spineRoot = null;           // THREE.Group wrapping GLTF root for global orientation
         this.rootCurrentQuat = new THREE.Quaternion(); // SLERP state for global tilt
+        this.userInteracting = false;    // true while user is dragging OrbitControls
+        this.lastInteractionTime = 0;    // timestamp of last orbit/pan release
 
         // ML / AI state
         this.recorder = new PostureRecorder();
@@ -175,6 +177,13 @@ class SpineSavior {
         this.controls.minDistance = 200;
         this.controls.maxDistance = 1200;
         this.controls.update();
+
+        // Track user interaction to pause camera follow during manual control
+        this.controls.addEventListener('start', () => { this.userInteracting = true; });
+        this.controls.addEventListener('end', () => {
+            this.userInteracting = false;
+            this.lastInteractionTime = performance.now();
+        });
 
         // Lighting — studio setup
         this.scene.add(new THREE.AmbientLight(0x505570, 0.5));
@@ -851,7 +860,9 @@ class SpineSavior {
         this.updateSpine();
 
         // Camera follow: track the model's center through global tilt
-        if (this.spineRoot && this.quaternionMode) {
+        // Pauses during user interaction and for 1.5s after release
+        if (this.spineRoot && this.quaternionMode && this.calibrationQuats
+            && !this.userInteracting && (now - this.lastInteractionTime > 1500)) {
             const modelCenter = new THREE.Vector3(0, 280, 0)
                 .applyQuaternion(this.spineRoot.quaternion);
             this.controls.target.lerp(modelCenter, 0.05);
@@ -928,7 +939,13 @@ class SpineSavior {
         });
         document.getElementById('simToggle').addEventListener('change', (e) => {
             this.simulationMode = e.target.checked;
-            if (this.simulationMode) this.updateConnectionUI('simulating');
+            if (this.simulationMode) {
+                this.updateConnectionUI('simulating');
+                // Auto-calibrate after first simulation frame so global tilt is visible
+                requestAnimationFrame(() => {
+                    if (this.simulationMode && this.dataReady) this.calibrate();
+                });
+            }
             else if (!this.device) { this.updateConnectionUI('disconnected'); this.dataReady = false; }
         });
         document.getElementById('calibrateBtn').addEventListener('click', () => this.calibrate());
